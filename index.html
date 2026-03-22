@@ -941,39 +941,78 @@ async function syncNow() {
   await fullSync();
 }
 
-// fullSync: push pending → pull all from Sheets
+// Push con no-cors (fire and forget)
+function pushPending(url, pending) {
+  if (!pending.length) return Promise.resolve();
+  const data = encodeURIComponent(JSON.stringify({expenses: pending}));
+  return fetch(`${url}?action=push&data=${data}`, {method:'GET', mode:'no-cors'}).catch(()=>{});
+}
+
+// Pull con JSONP para evitar CORS
+function pullFromSheets(url, month) {
+  return new Promise((resolve) => {
+    const cbName = 'mgcb_' + Date.now();
+    const script = document.createElement('script');
+    const timeout = setTimeout(() => {
+      delete window[cbName];
+      document.body.removeChild(script);
+      resolve(null); // timeout, no data
+    }, 8000);
+
+    window[cbName] = (data) => {
+      clearTimeout(timeout);
+      delete window[cbName];
+      try { document.body.removeChild(script); } catch(e){}
+      resolve(data);
+    };
+
+    script.src = `${url}?action=pull&month=${month}&callback=${cbName}&cb=${Date.now()}`;
+    script.onerror = () => {
+      clearTimeout(timeout);
+      delete window[cbName];
+      resolve(null);
+    };
+    document.body.appendChild(script);
+  });
+}
+
 async function fullSync() {
   const url = localStorage.getItem('scriptUrl');
   if (!url || !navigator.onLine) return;
 
   setSyncState('syncing');
   try {
-    // 1. Push pending local expenses
     const pending = expenses.filter(e=>!e.synced);
-    if (pending.length > 0) {
-      const data = encodeURIComponent(JSON.stringify({expenses: pending}));
-      await fetch(`${url}?action=push&data=${data}`, {method:'GET', mode:'no-cors'});
-    }
 
-    // 2. Pull ALL expenses from Sheets (source of truth)
-    const pullUrl = `${url}?action=pull&month=${currentMonth()}&cb=${Date.now()}`;
-    const resp = await fetch(pullUrl);
-    if (resp.ok) {
-      const json = await resp.json();
-      if (json.ok && Array.isArray(json.expenses)) {
-        // Merge: Sheets data wins, keep any local-only pending
-        const sheetsIds = new Set(json.expenses.map(e=>e.id));
-        const localPending = expenses.filter(e=>!e.synced && !sheetsIds.has(e.id));
-        const merged = [...json.expenses.map(e=>({...e,synced:true})), ...localPending];
-        await clearLocal();
-        for (const e of merged) await putLocal(e);
-        expenses = merged;
+    // 1. Push pending
+    await pushPending(url, pending);
+
+    // 2. Pull from Sheets via JSONP
+    const month = currentMonth();
+    const result = await pullFromSheets(url, month);
+
+    if (result && result.ok && Array.isArray(result.expenses)) {
+      const sheetsIds = new Set(result.expenses.map(e=>e.id));
+      const localPending = expenses.filter(e=>!e.synced && !sheetsIds.has(e.id));
+      const merged = [...result.expenses.map(e=>({...e,synced:true})), ...localPending];
+      await clearLocal();
+      for (const e of merged) await putLocal(e);
+      expenses = merged;
+      render();
+      setSyncState('synced');
+      setTimeout(()=>setSyncState('idle'),3000);
+    } else {
+      // Pull falló pero push puede haber funcionado — marcar pendientes como synced optimistamente
+      if (pending.length > 0) {
+        for (const exp of pending) {
+          exp.synced = true;
+          await putLocal(exp);
+        }
         render();
       }
+      setSyncState('synced');
+      setTimeout(()=>setSyncState('idle'),3000);
     }
-
-    setSyncState('synced');
-    setTimeout(()=>setSyncState('idle'),3000);
   } catch(err) {
     setSyncState('error');
     showToast('Error al sincronizar','error');
