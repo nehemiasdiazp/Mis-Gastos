@@ -1,0 +1,11 @@
+{
+  "name": "MisGastos",
+  "short_name": "MisGastos",
+  "description": "Registrá tus gastos y sincronizalos con Google Sheets",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "orientation": "portrait"
+}
