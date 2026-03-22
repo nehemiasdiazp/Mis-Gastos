@@ -920,8 +920,10 @@ function saveConfig() {
 }
 
 // ════════════════════════════════════════
-//  SYNC — Sheets es la fuente de verdad
+//  SYNC — JSONBin como intermediario
 // ════════════════════════════════════════
+const JSONBIN_API_KEY = '$2a$10$c4s7NzQ/N/qkoTr0vQK.ouHrWkGRre.oeHOzLqgBozPogBLz42e5u';
+
 function setSyncState(state) {
   const btn=document.getElementById('syncBtn');
   const dot=document.getElementById('syncDot');
@@ -941,39 +943,47 @@ async function syncNow() {
   await fullSync();
 }
 
-// Push con no-cors (fire and forget)
+// Push pending con no-cors
 function pushPending(url, pending) {
   if (!pending.length) return Promise.resolve();
   const data = encodeURIComponent(JSON.stringify({expenses: pending}));
   return fetch(`${url}?action=push&data=${data}`, {method:'GET', mode:'no-cors'}).catch(()=>{});
 }
 
-// Pull con JSONP para evitar CORS
-function pullFromSheets(url, month) {
+// Obtener binId desde Apps Script via JSONP
+function getBinId(url) {
   return new Promise((resolve) => {
-    const cbName = 'mgcb_' + Date.now();
+    const cbName = 'mgbid_' + Date.now();
     const script = document.createElement('script');
     const timeout = setTimeout(() => {
       delete window[cbName];
-      document.body.removeChild(script);
-      resolve(null); // timeout, no data
-    }, 8000);
-
+      try { document.body.removeChild(script); } catch(e){}
+      resolve(null);
+    }, 6000);
     window[cbName] = (data) => {
       clearTimeout(timeout);
       delete window[cbName];
       try { document.body.removeChild(script); } catch(e){}
-      resolve(data);
+      resolve(data && data.binId ? data.binId : null);
     };
-
-    script.src = `${url}?action=pull&month=${month}&callback=${cbName}&cb=${Date.now()}`;
-    script.onerror = () => {
-      clearTimeout(timeout);
-      delete window[cbName];
-      resolve(null);
-    };
+    script.src = `${url}?action=binid&callback=${cbName}&cb=${Date.now()}`;
+    script.onerror = () => { clearTimeout(timeout); delete window[cbName]; resolve(null); };
     document.body.appendChild(script);
   });
+}
+
+// Leer desde JSONBin directamente (sin CORS)
+async function pullFromJSONBin(binId) {
+  try {
+    const resp = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
+      headers: { 'X-Master-Key': JSONBIN_API_KEY }
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    return json.record || null;
+  } catch(e) {
+    return null;
+  }
 }
 
 async function fullSync() {
@@ -984,35 +994,47 @@ async function fullSync() {
   try {
     const pending = expenses.filter(e=>!e.synced);
 
-    // 1. Push pending
+    // 1. Push pending a Sheets (y Sheets actualiza JSONBin)
     await pushPending(url, pending);
 
-    // 2. Pull from Sheets via JSONP
-    const month = currentMonth();
-    const result = await pullFromSheets(url, month);
+    // 2. Esperar un momento para que Sheets procese
+    if (pending.length > 0) await new Promise(r => setTimeout(r, 2000));
 
-    if (result && result.ok && Array.isArray(result.expenses)) {
-      const sheetsIds = new Set(result.expenses.map(e=>e.id));
-      const localPending = expenses.filter(e=>!e.synced && !sheetsIds.has(e.id));
-      const merged = [...result.expenses.map(e=>({...e,synced:true})), ...localPending];
-      await clearLocal();
-      for (const e of merged) await putLocal(e);
-      expenses = merged;
-      render();
-      setSyncState('synced');
-      setTimeout(()=>setSyncState('idle'),3000);
-    } else {
-      // Pull falló pero push puede haber funcionado — marcar pendientes como synced optimistamente
-      if (pending.length > 0) {
-        for (const exp of pending) {
-          exp.synced = true;
-          await putLocal(exp);
-        }
-        render();
-      }
-      setSyncState('synced');
-      setTimeout(()=>setSyncState('idle'),3000);
+    // 3. Obtener el binId desde Apps Script
+    let binId = localStorage.getItem('jsonbinId');
+    if (!binId) {
+      binId = await getBinId(url);
+      if (binId) localStorage.setItem('jsonbinId', binId);
     }
+
+    if (binId) {
+      // 4. Leer todos los gastos desde JSONBin
+      const record = await pullFromJSONBin(binId);
+      if (record && Array.isArray(record.expenses)) {
+        const month = currentMonth();
+        const monthExp = record.expenses.filter(e => e.month === month);
+        const sheetsIds = new Set(monthExp.map(e=>e.id));
+        const localPending = expenses.filter(e=>!e.synced && !sheetsIds.has(e.id));
+        const merged = [...monthExp.map(e=>({...e,synced:true})), ...localPending];
+        await clearLocal();
+        for (const e of merged) await putLocal(e);
+        expenses = merged;
+        render();
+        setSyncState('synced');
+        setTimeout(()=>setSyncState('idle'),3000);
+        return;
+      }
+    }
+
+    // Si no pudimos leer, al menos marcar los pushed como synced
+    for (const exp of pending) {
+      exp.synced = true;
+      await putLocal(exp);
+    }
+    render();
+    setSyncState('synced');
+    setTimeout(()=>setSyncState('idle'),3000);
+
   } catch(err) {
     setSyncState('error');
     showToast('Error al sincronizar','error');
