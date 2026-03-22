@@ -576,6 +576,7 @@ const clearLocal = () => new Promise(res => { const r=store('readwrite').clear()
 // ════════════════════════════════════════
 const currentMonth = () => { const n=new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`; };
 const monthName = m => { const [y,mo]=m.split('-'); return ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][+mo-1]+' '+y; };
+const normalizeMonth = (m) => { if (!m) return ""; const s=String(m); if (/^\d{4}-\d{2}$/.test(s)) return s; const d=new Date(m); if (!isNaN(d)) return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); return s; };
 const fmtARS = n => new Intl.NumberFormat('es-AR',{minimumFractionDigits:0,maximumFractionDigits:0}).format(n);
 const fmtDate = iso => new Date(iso).toLocaleDateString('es-AR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
 const getCat = id => categories.find(c=>c.id===id) || {name:id,icon:'📌'};
@@ -602,7 +603,7 @@ function switchTab(name) {
 // ════════════════════════════════════════
 function render() {
   const month = currentMonth();
-  const monthExp = expenses.filter(e => e.month === month);
+  const monthExp = expenses.filter(e => normalizeMonth(e.month) === month);
 
   document.getElementById('monthLabel').textContent = monthName(month);
   document.getElementById('chartTitle').textContent = `Gastos por categoría — ${monthName(month)}`;
@@ -703,7 +704,7 @@ function renderCategoriesGrid(monthExp) {
 
 function renderChart() {
   const month = currentMonth();
-  const monthExp = expenses.filter(e=>e.month===month);
+  const monthExp = expenses.filter(e=>normalizeMonth(e.month)===month);
   const total = monthExp.reduce((s,e)=>s+e.amount,0);
   const bars = document.getElementById('chartBars');
   bars.innerHTML = '';
@@ -989,7 +990,7 @@ async function fullSync() {
 
     if (result && result.ok && Array.isArray(result.expenses)) {
       const month = currentMonth();
-      const monthExp = result.expenses.filter(e => e.month === month);
+      const monthExp = result.expenses.filter(e => normalizeMonth(e.month) === month);
       const sheetsIds = new Set(monthExp.map(e=>e.id));
       const localPending = expenses.filter(e=>!e.synced && !sheetsIds.has(e.id));
       const merged = [...monthExp.map(e=>({...e,synced:true})), ...localPending];
